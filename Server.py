@@ -1,94 +1,150 @@
 import socket
-from ServerHello import ServerHello
+import hmac
+import logging
+import threading
+import json
+
 from ClientHello import ClientHello
-from cert_utils import generate_self_signed_cert
+from ServerHello import ServerHello
 from Certificate import Certificate
-from dh_utils import *
 from ServerKeyExchange import ServerKeyExchange
 from ClientKeyExchange import ClientKeyExchange
-from Finished import Finished, compute_verify_data
-import hmac
+from dh_utils import *
 from ChangeCipherSpec import ChangeCipherSpec
+from Finished import Finished, compute_verify_data
+from cert_utils import generate_self_signed_cert
+from AES_utils import AESUtils
 
-# 1. Socket başlat, client’ı bekle
-sock = socket.socket()
-sock.bind(('localhost', 12345))
-sock.listen(1)
-conn, _ = sock.accept()
+logging.basicConfig(level=logging.INFO, format='[SERVER] %(message)s')
 
-# 2. ClientHello al
-print("Waiting for ClientHello...")
-data = conn.recv(4096)
-client_hello = ClientHello.from_bytes(data)
-print("ClientHello received")
-transcript = data
+running = True
 
-# 3. ServerHello oluştur ve gönder
-print("Sending ServerHello...")
-server_hello = ServerHello()
-server_hello_bytes = server_hello.to_bytes()
-conn.sendall(server_hello_bytes)
-print("ServerHello sent")
-transcript += server_hello_bytes
+def handle_tls_connection(conn, addr):
+    try:
+        conn.settimeout(3.0)
+        logging.info(f"Connection accepted from {addr}")
 
-print("Generating self-signed certificate...")
-# 4. Sertifika oluştur ve gönder
-cert_bytes = generate_self_signed_cert()  # bunu sen yazmıştın
-certificate = Certificate(cert_bytes)
-cert_bytes = certificate.to_bytes()
-conn.sendall(cert_bytes)
-print("Certificate sent")
-transcript += cert_bytes
+        data = conn.recv(4096)
+        client_hello = ClientHello.from_bytes(data)
+        transcript = data
+        logging.info("ClientHello received")
 
-# 5. DH keypair oluştur, ServerKeyExchange gönder
-print("Generating DH keypair...")
-params = get_common_dh_parameters()
-server_priv, server_pub = generate_keypair(params)
-server_pub_bytes = serialize_public_key(server_pub)
-print("DH keypair generated")
-ske = ServerKeyExchange(server_pub_bytes)
-ske_bytes = ske.to_bytes()
-conn.sendall(ske_bytes)
-print("ServerKeyExchange sent")
-transcript += ske_bytes
+        server_hello = ServerHello()
+        server_hello_bytes = server_hello.to_bytes()
+        conn.sendall(server_hello_bytes)
+        transcript += server_hello_bytes
+        logging.info("ServerHello sent")
 
-# 6. ClientKeyExchange al
-print("Waiting for ClientKeyExchange...")
-data = conn.recv(4096)
-print("ClientKeyExchange received")
-cke = ClientKeyExchange.from_bytes(data)
-client_pub = deserialize_public_key(cke.public_key_bytes)
-transcript += data
+        cert_bytes = generate_self_signed_cert()
+        certificate = Certificate(cert_bytes)
+        cert_msg = certificate.to_bytes()
+        conn.sendall(cert_msg)
+        transcript += cert_msg
+        logging.info("Certificate sent")
 
-# 7. Shared key hesapla
-print("Calculating shared key...")
-shared_key = derive_shared_key(server_priv, client_pub)
+        params = get_common_dh_parameters()
+        server_priv, server_pub = generate_keypair(params)
+        pub_bytes = serialize_public_key(server_pub)
+        ske = ServerKeyExchange(pub_bytes)
+        ske_bytes = ske.to_bytes()
+        conn.sendall(ske_bytes)
+        transcript += ske_bytes
+        logging.info("ServerKeyExchange sent")
 
-# 8. ChangeCipherSpec al
-conn.recv(4096)
+        data = conn.recv(4096)
+        cke = ClientKeyExchange.from_bytes(data)
+        client_pub = deserialize_public_key(cke.public_key_bytes)
+        transcript += data
+        logging.info("ClientKeyExchange received")
 
-# 9. Finished al
-print("Waiting for Finished...")
-data = conn.recv(4096)
-print("Finished received")
-client_finished = Finished.from_bytes(data)
-expected = compute_verify_data(transcript, shared_key)
+        shared_key = derive_shared_key(server_priv, client_pub)
+        aes_key = shared_key[:32]
 
-# 10. Doğrula
-if not hmac.compare_digest(client_finished.verify_data, expected):
-    print("Handshake failed 🚫")
-    conn.close()
-    exit()
+        # ChangeCipherSpec + Finished tek seferde al
+        data = conn.recv(4096)
+        if data[0] == 0x06:
+            logging.info("ChangeCipherSpec received")
+            client_finished = Finished.from_bytes(data[4:])
+        else:
+            client_finished = Finished.from_bytes(data)
 
-# 11. ChangeCipherSpec gönder
-ccs = ChangeCipherSpec()
-conn.sendall(ccs.to_bytes())
+        expected = compute_verify_data(transcript, shared_key)
+        logging.info("Finished received")
+        if not hmac.compare_digest(client_finished.verify_data, expected):
+            logging.error("Finished verify failed.")
+            return
 
-# 12. Finished mesajı oluştur ve gönder
-verify_data = compute_verify_data(transcript, shared_key)
-finished = Finished(verify_data)
-conn.sendall(finished.to_bytes())
+        logging.info("Finished verify succeeded")
 
-print("Handshake completed successfully ✅")
+        conn.sendall(ChangeCipherSpec().to_bytes())
+        logging.info("ChangeCipherSpec sent")
 
-conn.close()
+        verify_data = compute_verify_data(transcript, shared_key)
+        finished = Finished(verify_data)
+        conn.sendall(finished.to_bytes())
+        logging.info("Finished sent")
+
+        logging.info("Waiting for encrypted message from client...")
+        try:
+            data = conn.recv(4096)
+            decrypted = AESUtils.decrypt(aes_key, data)
+        except Exception as e:
+            logging.error(f"[DECRYPT ERROR] {e}")
+            return
+
+        try:
+            user_data = json.loads(decrypted.decode())
+            name = user_data.get("name", "")
+            surname = user_data.get("surname", "")
+            password = user_data.get("password", "")
+
+            logging.info(f"[KULLANICI GİRİŞİ]")
+            logging.info(f"Ad: {name}")
+            logging.info(f"Soyad: {surname}")
+            logging.info(f"Parola: {password}")
+
+            response = f"Kullanıcı bilgileri alındı: {name} {surname}"
+        except Exception as e:
+            logging.error(f"[JSON ERROR] {e}")
+            response = "❌ Bilgiler okunamadı."
+
+        encrypted_response = AESUtils.encrypt(aes_key, response.encode())
+        conn.sendall(encrypted_response)
+        logging.info("Encrypted response sent")
+
+    except socket.timeout:
+        logging.error("Timeout.")
+    except Exception as e:
+        logging.error(f"Error: {e}")
+    finally:
+        conn.close()
+        logging.info("Connection closed")
+
+def server_loop():
+    global running
+    server_socket = socket.socket()
+    server_socket.bind(('localhost', 12345))
+    server_socket.listen(5)
+    server_socket.settimeout(1.0)
+    logging.info("Server is listening... (Press ENTER to stop)\n")
+
+    while running:
+        try:
+            conn, addr = server_socket.accept()
+            handle_tls_connection(conn, addr)
+        except socket.timeout:
+            continue
+        except Exception as e:
+            logging.error(f"Server error: {e}")
+            break
+
+    server_socket.close()
+    logging.info("Server stopped.")
+
+def wait_for_enter():
+    global running
+    input()
+    running = False
+
+threading.Thread(target=server_loop).start()
+threading.Thread(target=wait_for_enter).start()
