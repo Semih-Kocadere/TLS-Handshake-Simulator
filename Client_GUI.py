@@ -5,6 +5,7 @@ import json
 import tkinter as tk
 from tkinter import messagebox
 import time
+import binascii
 
 from ClientHello import ClientHello
 from ServerHello import ServerHello
@@ -73,7 +74,7 @@ def perform_tls_communication(fullname, password, message, log_fn=lambda msg: No
         log_fn("📤 ChangeCipherSpec + Finished gönderildi")
 
         # 8. Server Finished
-        sock.recv(4096)  # ChangeCipherSpec
+        sock.recv(4096)
         data = sock.recv(4096)
         server_finished = Finished.from_bytes(data)
         expected = compute_verify_data(transcript, shared_key)
@@ -99,11 +100,21 @@ def perform_tls_communication(fullname, password, message, log_fn=lambda msg: No
         sock.sendall(encrypted)
         log_fn(f"📤 Mesaj şifreli olarak gönderildi")
 
+        # --- Yeni: GUI'de göster ---
+        original_message_text.delete(1.0, tk.END)
+        original_message_text.insert(tk.END, message)
+
+        encrypted_text.delete(1.0, tk.END)
+        encrypted_text.insert(tk.END, binascii.hexlify(encrypted).decode())
+
         # 10. Cevabı al
         response = sock.recv(4096)
         decrypted = AESUtils.decrypt(aes_key, response)
         log_fn("📥 Şifreli yanıt alındı")
         sock.close()
+
+        decrypted_text.delete(1.0, tk.END)
+        decrypted_text.insert(tk.END, decrypted.decode())
 
         return f"✅ Server yanıtı:\n{decrypted.decode()}"
 
@@ -114,7 +125,7 @@ def perform_tls_communication(fullname, password, message, log_fn=lambda msg: No
 # === GUI ===
 root = tk.Tk()
 root.title("TLS Client GUI")
-root.geometry("400x470")
+root.geometry("700x650")
 
 frame = tk.Frame(root)
 frame.pack(pady=10)
@@ -131,12 +142,27 @@ tk.Label(frame, text="Mesaj:").grid(row=2, column=0, sticky='e')
 entry_message = tk.Entry(frame, width=30)
 entry_message.grid(row=2, column=1)
 
-log_text = tk.Text(root, height=10, width=50)
+tk.Button(root, text="Connect & Send", command=lambda: on_send()).pack(pady=10)
+
+log_text = tk.Text(root, height=10, width=80)
 log_text.pack(pady=10)
 
 def log_gui(message):
     log_text.insert(tk.END, message + "\n")
     log_text.see(tk.END)
+
+# === Yeni Metin Alanları ===
+tk.Label(root, text="📨 Orijinal Mesaj").pack()
+original_message_text = tk.Text(root, height=2, width=80)
+original_message_text.pack()
+
+tk.Label(root, text="🔐 Şifrelenmiş Veri (hex)").pack()
+encrypted_text = tk.Text(root, height=4, width=80)
+encrypted_text.pack()
+
+tk.Label(root, text="📄 Sunucudan Gelen Açık Yanıt").pack()
+decrypted_text = tk.Text(root, height=4, width=80)
+decrypted_text.pack()
 
 def on_send():
     fullname = entry_fullname.get().strip()
@@ -153,7 +179,5 @@ def on_send():
     log_text.delete(1.0, tk.END)
     result = perform_tls_communication(fullname, password, message, log_gui)
     messagebox.showinfo("Sunucu Yanıtı", result)
-
-tk.Button(root, text="Connect & Send", command=on_send).pack(pady=10)
 
 root.mainloop()
