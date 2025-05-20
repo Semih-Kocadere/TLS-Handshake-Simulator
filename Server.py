@@ -24,17 +24,20 @@ def handle_tls_connection(conn, addr):
         conn.settimeout(3.0)
         logging.info(f"Connection accepted from {addr}")
 
+        # 1. ClientHello
         data = conn.recv(4096)
         client_hello = ClientHello.from_bytes(data)
         transcript = data
         logging.info("ClientHello received")
 
+        # 2. ServerHello
         server_hello = ServerHello()
         server_hello_bytes = server_hello.to_bytes()
         conn.sendall(server_hello_bytes)
         transcript += server_hello_bytes
         logging.info("ServerHello sent")
 
+        # 3. Certificate
         cert_bytes = generate_self_signed_cert()
         certificate = Certificate(cert_bytes)
         cert_msg = certificate.to_bytes()
@@ -42,6 +45,7 @@ def handle_tls_connection(conn, addr):
         transcript += cert_msg
         logging.info("Certificate sent")
 
+        # 4. ServerKeyExchange
         params = get_common_dh_parameters()
         server_priv, server_pub = generate_keypair(params)
         pub_bytes = serialize_public_key(server_pub)
@@ -51,16 +55,18 @@ def handle_tls_connection(conn, addr):
         transcript += ske_bytes
         logging.info("ServerKeyExchange sent")
 
+        # 5. ClientKeyExchange
         data = conn.recv(4096)
         cke = ClientKeyExchange.from_bytes(data)
         client_pub = deserialize_public_key(cke.public_key_bytes)
         transcript += data
         logging.info("ClientKeyExchange received")
 
+        # 6. Ortak anahtar hesapla
         shared_key = derive_shared_key(server_priv, client_pub)
         aes_key = shared_key[:32]
 
-        # ChangeCipherSpec + Finished tek seferde al
+        # 7. ChangeCipherSpec + Finished tek pakette gelir
         data = conn.recv(4096)
         if data[0] == 0x06:
             logging.info("ChangeCipherSpec received")
@@ -76,6 +82,7 @@ def handle_tls_connection(conn, addr):
 
         logging.info("Finished verify succeeded")
 
+        # 8. Server taraflı ChangeCipherSpec + Finished
         conn.sendall(ChangeCipherSpec().to_bytes())
         logging.info("ChangeCipherSpec sent")
 
@@ -84,6 +91,7 @@ def handle_tls_connection(conn, addr):
         conn.sendall(finished.to_bytes())
         logging.info("Finished sent")
 
+        # 9. Şifreli mesajı al
         logging.info("Waiting for encrypted message from client...")
         try:
             data = conn.recv(4096)
@@ -92,22 +100,26 @@ def handle_tls_connection(conn, addr):
             logging.error(f"[DECRYPT ERROR] {e}")
             return
 
+        # 10. Mesajı çöz ve logla
         try:
             user_data = json.loads(decrypted.decode())
             name = user_data.get("name", "")
             surname = user_data.get("surname", "")
             password = user_data.get("password", "")
+            message = user_data.get("custom_message", "")
 
             logging.info(f"[KULLANICI GİRİŞİ]")
             logging.info(f"Ad: {name}")
             logging.info(f"Soyad: {surname}")
             logging.info(f"Parola: {password}")
+            logging.info(f"Mesaj: {message}")
 
-            response = f"Kullanıcı bilgileri alındı: {name} {surname}"
+            response = f"Sunucu mesajı aldı: {message}"
         except Exception as e:
             logging.error(f"[JSON ERROR] {e}")
             response = "❌ Bilgiler okunamadı."
 
+        # 11. Şifreli yanıt gönder
         encrypted_response = AESUtils.encrypt(aes_key, response.encode())
         conn.sendall(encrypted_response)
         logging.info("Encrypted response sent")
@@ -146,5 +158,6 @@ def wait_for_enter():
     input()
     running = False
 
+# Başlat
 threading.Thread(target=server_loop).start()
 threading.Thread(target=wait_for_enter).start()

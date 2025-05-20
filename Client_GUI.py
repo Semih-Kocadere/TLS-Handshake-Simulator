@@ -18,7 +18,7 @@ from AES_utils import AESUtils
 
 logging.basicConfig(level=logging.INFO, format='[CLIENT-GUI] %(message)s')
 
-def perform_tls_communication(fullname, password, log_fn=lambda msg: None):
+def perform_tls_communication(fullname, password, message, log_fn=lambda msg: None):
     try:
         sock = socket.create_connection(('localhost', 12345))
         transcript = b''
@@ -83,7 +83,7 @@ def perform_tls_communication(fullname, password, log_fn=lambda msg: None):
 
         log_fn("✅ Handshake başarılı")
 
-        # 9. Kullanıcı verisi hazırlama
+        # 9. Kullanıcı verisi ve mesajı gönder
         parts = fullname.strip().split()
         name = parts[0]
         surname = " ".join(parts[1:]) if len(parts) > 1 else ""
@@ -91,19 +91,21 @@ def perform_tls_communication(fullname, password, log_fn=lambda msg: None):
         payload = json.dumps({
             "name": name,
             "surname": surname,
-            "password": password
+            "password": password,
+            "custom_message": message
         }).encode()
+
         encrypted = AESUtils.encrypt(aes_key, payload)
         sock.sendall(encrypted)
-        log_fn("📤 Kullanıcı verisi şifreli olarak gönderildi")
+        log_fn(f"📤 Mesaj şifreli olarak gönderildi")
 
         # 10. Cevabı al
         response = sock.recv(4096)
         decrypted = AESUtils.decrypt(aes_key, response)
-        log_fn("📥 Sunucudan yanıt alındı")
+        log_fn("📥 Şifreli yanıt alındı")
         sock.close()
 
-        return f"👋 Hoşgeldiniz, {name} {surname}!\n\n✅ Server yanıtı:\n{decrypted.decode()}"
+        return f"✅ Server yanıtı:\n{decrypted.decode()}"
 
     except Exception as e:
         log_fn(f"⚠️ Hata oluştu: {e}")
@@ -112,7 +114,7 @@ def perform_tls_communication(fullname, password, log_fn=lambda msg: None):
 # === GUI ===
 root = tk.Tk()
 root.title("TLS Client GUI")
-root.geometry("380x400")
+root.geometry("400x470")
 
 frame = tk.Frame(root)
 frame.pack(pady=10)
@@ -125,7 +127,11 @@ tk.Label(frame, text="Parola:").grid(row=1, column=0, sticky='e')
 entry_pass = tk.Entry(frame, show="*", width=30)
 entry_pass.grid(row=1, column=1)
 
-log_text = tk.Text(root, height=10, width=45)
+tk.Label(frame, text="Mesaj:").grid(row=2, column=0, sticky='e')
+entry_message = tk.Entry(frame, width=30)
+entry_message.grid(row=2, column=1)
+
+log_text = tk.Text(root, height=10, width=50)
 log_text.pack(pady=10)
 
 def log_gui(message):
@@ -135,8 +141,8 @@ def log_gui(message):
 def on_send():
     fullname = entry_fullname.get().strip()
     password = entry_pass.get().strip()
+    message = entry_message.get().strip()
 
-    # Alan doğrulama
     if not fullname or not password:
         messagebox.showerror("Hata", "Lütfen tüm alanları doldurun.")
         return
@@ -145,7 +151,7 @@ def on_send():
         return
 
     log_text.delete(1.0, tk.END)
-    result = perform_tls_communication(fullname, password, log_gui)
+    result = perform_tls_communication(fullname, password, message, log_gui)
     messagebox.showinfo("Sunucu Yanıtı", result)
 
 tk.Button(root, text="Connect & Send", command=on_send).pack(pady=10)
