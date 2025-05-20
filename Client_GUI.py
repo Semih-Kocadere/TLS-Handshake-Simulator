@@ -18,32 +18,37 @@ from AES_utils import AESUtils
 
 logging.basicConfig(level=logging.INFO, format='[CLIENT-GUI] %(message)s')
 
-def perform_tls_communication(fullname, password):
+def perform_tls_communication(fullname, password, log_fn=lambda msg: None):
     try:
         sock = socket.create_connection(('localhost', 12345))
         transcript = b''
+        log_fn("🔌 Bağlantı sağlandı.")
 
         # 1. ClientHello
         client_hello = ClientHello()
         ch_bytes = client_hello.to_bytes()
         sock.sendall(ch_bytes)
         transcript += ch_bytes
+        log_fn("📤 ClientHello gönderildi")
 
         # 2. ServerHello
         data = sock.recv(4096)
         server_hello = ServerHello.from_bytes(data)
         transcript += data
+        log_fn("📥 ServerHello alındı")
 
         # 3. Certificate
         data = sock.recv(4096)
         certificate = Certificate.from_bytes(data)
         transcript += data
+        log_fn("📥 Certificate alındı")
 
         # 4. ServerKeyExchange
         data = sock.recv(4096)
         ske = ServerKeyExchange.from_bytes(data)
         server_pubkey = deserialize_public_key(ske.public_key_bytes)
         transcript += data
+        log_fn("📥 ServerKeyExchange alındı")
 
         # 5. ClientKeyExchange
         params = get_common_dh_parameters()
@@ -53,21 +58,22 @@ def perform_tls_communication(fullname, password):
         cke_bytes = cke.to_bytes()
         sock.sendall(cke_bytes)
         transcript += cke_bytes
+        log_fn("📤 ClientKeyExchange gönderildi")
 
         # 6. Shared key
         shared_key = derive_shared_key(client_priv, server_pubkey)
         aes_key = shared_key[:32]
+        log_fn("🔐 Ortak anahtar türetildi")
 
-        # 7. ChangeCipherSpec
-        sock.sendall(ChangeCipherSpec().to_bytes())
-
-        # 8. Finished
+        # 7. ChangeCipherSpec + Finished birlikte gönder
         verify_data = compute_verify_data(transcript, shared_key)
         finished = Finished(verify_data)
-        sock.sendall(finished.to_bytes())
+        combined_msg = ChangeCipherSpec().to_bytes() + finished.to_bytes()
+        sock.sendall(combined_msg)
+        log_fn("📤 ChangeCipherSpec + Finished gönderildi")
 
-        # 9. Receive server's Finished
-        sock.recv(4096)
+        # 8. Server Finished
+        sock.recv(4096)  # ChangeCipherSpec
         data = sock.recv(4096)
         server_finished = Finished.from_bytes(data)
         expected = compute_verify_data(transcript, shared_key)
@@ -75,15 +81,13 @@ def perform_tls_communication(fullname, password):
         if not hmac.compare_digest(server_finished.verify_data, expected):
             return "❌ TLS handshake doğrulaması başarısız!"
 
-        # ✅ GECİKME
-        time.sleep(0.1)
+        log_fn("✅ Handshake başarılı")
 
-        # ✂️ Ad ve soyad ayır
+        # 9. Kullanıcı verisi hazırlama
         parts = fullname.strip().split()
         name = parts[0]
         surname = " ".join(parts[1:]) if len(parts) > 1 else ""
 
-        # 10. Kullanıcı verisini gönder
         payload = json.dumps({
             "name": name,
             "surname": surname,
@@ -91,40 +95,59 @@ def perform_tls_communication(fullname, password):
         }).encode()
         encrypted = AESUtils.encrypt(aes_key, payload)
         sock.sendall(encrypted)
+        log_fn("📤 Kullanıcı verisi şifreli olarak gönderildi")
 
-        # 11. Yanıtı al
+        # 10. Cevabı al
         response = sock.recv(4096)
         decrypted = AESUtils.decrypt(aes_key, response)
+        log_fn("📥 Sunucudan yanıt alındı")
         sock.close()
 
         return f"👋 Hoşgeldiniz, {name} {surname}!\n\n✅ Server yanıtı:\n{decrypted.decode()}"
 
     except Exception as e:
-        logging.error(f"Hata: {e}")
+        log_fn(f"⚠️ Hata oluştu: {e}")
         return f"⚠️ Hata oluştu:\n{e}"
 
-def on_send():
-    fullname = entry_fullname.get()
-    password = entry_pass.get()
-    result = perform_tls_communication(fullname, password)
-    messagebox.showinfo("Server Response", result)
-
-# GUI
+# === GUI ===
 root = tk.Tk()
 root.title("TLS Client GUI")
-root.geometry("320x260")
+root.geometry("380x400")
 
 frame = tk.Frame(root)
-frame.pack(pady=20)
+frame.pack(pady=10)
 
 tk.Label(frame, text="Ad Soyad:").grid(row=0, column=0, sticky='e')
-entry_fullname = tk.Entry(frame)
+entry_fullname = tk.Entry(frame, width=30)
 entry_fullname.grid(row=0, column=1)
 
 tk.Label(frame, text="Parola:").grid(row=1, column=0, sticky='e')
-entry_pass = tk.Entry(frame, show="*")
+entry_pass = tk.Entry(frame, show="*", width=30)
 entry_pass.grid(row=1, column=1)
 
-tk.Button(root, text="Connect & Send", command=on_send).pack(pady=20)
+log_text = tk.Text(root, height=10, width=45)
+log_text.pack(pady=10)
+
+def log_gui(message):
+    log_text.insert(tk.END, message + "\n")
+    log_text.see(tk.END)
+
+def on_send():
+    fullname = entry_fullname.get().strip()
+    password = entry_pass.get().strip()
+
+    # Alan doğrulama
+    if not fullname or not password:
+        messagebox.showerror("Hata", "Lütfen tüm alanları doldurun.")
+        return
+    if len(password) < 4:
+        messagebox.showerror("Hata", "Parola en az 4 karakter olmalıdır.")
+        return
+
+    log_text.delete(1.0, tk.END)
+    result = perform_tls_communication(fullname, password, log_gui)
+    messagebox.showinfo("Sunucu Yanıtı", result)
+
+tk.Button(root, text="Connect & Send", command=on_send).pack(pady=10)
 
 root.mainloop()
